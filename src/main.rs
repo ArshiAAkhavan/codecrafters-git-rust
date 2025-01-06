@@ -17,6 +17,6 @@ fn main() {
             let _ = fs::create_dir(".git/refs");
             let _ = fs::write(".git/HEAD", "ref: refs/heads/master\n");
         }
-        _ => panic!("unknown command {command}"),
+        _ => eprintln!("unknown command {command}"),
     }
 }
