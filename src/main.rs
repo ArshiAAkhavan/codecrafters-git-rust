@@ -7,15 +7,16 @@ fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     eprintln!("Logs from your program will appear here!");
 
-    // Uncomment this block to pass the first stage
     let args: Vec<String> = env::args().collect();
-    if args[1] == "init" {
-        fs::create_dir(".git").unwrap();
-        fs::create_dir(".git/objects").unwrap();
-        fs::create_dir(".git/refs").unwrap();
-        fs::write(".git/HEAD", "ref: refs/heads/main\n").unwrap();
-        println!("Initialized git directory")
-    } else {
-        println!("unknown command: {}", args[1])
+    let command = &*args[1];
+
+    match command {
+        "init" => {
+            let _ = fs::create_dir(".git");
+            let _ = fs::create_dir(".git/objects");
+            let _ = fs::create_dir(".git/refs");
+            let _ = fs::write(".git/HEAD", "ref: refs/heads/master\n");
+        }
+        _ => panic!("unknown command {command}"),
     }
 }
