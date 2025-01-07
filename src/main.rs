@@ -1,4 +1,4 @@
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::{fs, path::PathBuf};
 
 use anyhow::Ok;
@@ -25,6 +25,11 @@ enum GitCmd {
         write: bool,
         path: String,
     },
+    LsTree {
+        #[clap(long)]
+        name_only: bool,
+        hash: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -39,6 +44,7 @@ fn main() -> anyhow::Result<()> {
             cat_file(&hash)
         }
         GitCmd::HashObject { write, path } => hash_object(write, &path),
+        GitCmd::LsTree { name_only, hash } => ls_tree(name_only, &hash),
     }
     Ok(())
 }
@@ -50,13 +56,8 @@ fn init() {
     fs::write(".git/HEAD", "ref: refs/heads/master\n").unwrap();
 }
 
-fn cat_file(file_hash: &str) {
-    let object = std::fs::File::open(format!(
-        ".git/objects/{}/{}",
-        &file_hash[..2],
-        &file_hash[2..]
-    ))
-    .unwrap();
+fn cat_file(hash: &str) {
+    let object = std::fs::File::open(object_path(hash)).unwrap();
     let mut zlib_decoder = flate2::read::ZlibDecoder::new(object);
 
     let mut buf = Vec::new();
@@ -86,9 +87,7 @@ fn hash_object(write: bool, path: &str) {
     if !write {
         return;
     }
-    let mut object_path = PathBuf::from(".git/objects");
-    object_path.push(&hex_string[..2]);
-    fs::create_dir_all(&object_path).unwrap();
+    fs::create_dir_all(format!(".git/objects/{}", &hex_string[..2])).unwrap();
 
     let mut blob = header.as_bytes().to_vec();
     blob.extend(buf);
@@ -96,6 +95,51 @@ fn hash_object(write: bool, path: &str) {
     let mut compressed_buf = Vec::new();
     zlib_encoder.read_to_end(&mut compressed_buf).unwrap();
 
-    object_path.push(&hex_string[2..]);
-    fs::write(object_path, compressed_buf).unwrap();
+    fs::write(object_path(&hex_string), compressed_buf).unwrap();
+}
+
+fn ls_tree(name_only: bool, hash: &str) {
+    let tree = std::fs::File::open(object_path(hash)).unwrap();
+    let mut zlib_decoder = flate2::read::ZlibDecoder::new(tree);
+
+    let mut buf = Vec::new();
+    zlib_decoder.read_to_end(&mut buf).unwrap();
+
+    #[derive(Default, Debug)]
+    struct Node {
+        mode: String,
+        name: String,
+        hash: Vec<u8>,
+    }
+
+    let mut nodes = Vec::new();
+    let mut ptr = buf.iter().position(|c| *c == b'\0').unwrap();
+    while let Some(mode_end_index) = buf[ptr..].iter().position(|c| *c == b' ') {
+        let mode = String::from_utf8(buf[ptr..ptr + mode_end_index].to_vec()).unwrap();
+        ptr += mode_end_index + 1;
+
+        if let Some(name_end_index) = buf[ptr..].iter().position(|c| *c == b'\0') {
+            let name = String::from_utf8(buf[ptr..ptr + name_end_index].to_vec()).unwrap();
+            ptr += name_end_index + 1;
+            let hash = buf[ptr..ptr + 20].to_vec();
+            ptr += 20;
+            nodes.push(Node { mode, name, hash });
+        } else {
+            panic!("malformed tree");
+        }
+    }
+    if name_only {
+        for node in nodes {
+            println!("{}", node.name);
+        }
+    } else {
+        print!("{nodes:?}");
+    }
+}
+
+fn object_path(hash: &str) -> PathBuf {
+    let mut p = PathBuf::from(".git/objects");
+    p.push(&hash[..2]);
+    p.push(&hash[2..]);
+    p
 }
