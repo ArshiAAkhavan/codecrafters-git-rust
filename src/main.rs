@@ -1,22 +1,41 @@
-#[allow(unused_imports)]
-use std::env;
-#[allow(unused_imports)]
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
 
-fn main() {
+use anyhow::Ok;
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct GitCli {
+    #[command(subcommand)]
+    cmd: GitCmd,
+}
+
+#[derive(Subcommand)]
+enum GitCmd {
+    Init,
+    CatFile {
+        #[clap(short)]
+        pretty_print: bool,
+        hash: String,
+    },
+    HashFile,
+}
+
+fn main() -> anyhow::Result<()> {
+    let cli = GitCli::parse();
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     eprintln!("Logs from your program will appear here!");
 
-    let args: Vec<String> = env::args().collect();
-    let command = &*args[1];
-
-    match command {
-        "init" => init(),
-        "cat-file" => cat_file(&args[2], &args[3]),
-        _ => eprintln!("unknown command {command}"),
+    match cli.cmd {
+        GitCmd::Init => init(),
+        GitCmd::CatFile { pretty_print, hash } => {
+            anyhow::ensure!(pretty_print, "must pass -p flag");
+            cat_file(&hash)
+        }
+        GitCmd::HashFile => todo!(),
     }
+    Ok(())
 }
 
 fn init() {
@@ -26,29 +45,22 @@ fn init() {
     fs::write(".git/HEAD", "ref: refs/heads/master\n").unwrap();
 }
 
-fn cat_file(flag: &str, file_hash: &str) {
-    match flag {
-        "-p" => {
-            let object = std::fs::File::open(format!(
-                ".git/objects/{}/{}",
-                &file_hash[0..2],
-                &file_hash[2..]
-            ))
-            .unwrap();
-            let mut zlib_decoder = flate2::read::ZlibDecoder::new(object);
+fn cat_file(file_hash: &str) {
+    let object = std::fs::File::open(format!(
+        ".git/objects/{}/{}",
+        &file_hash[0..2],
+        &file_hash[2..]
+    ))
+    .unwrap();
+    let mut zlib_decoder = flate2::read::ZlibDecoder::new(object);
 
-            let mut buf = Vec::new();
-            zlib_decoder.read_to_end(&mut buf).unwrap();
-            let mut iter = buf.iter();
+    let mut buf = Vec::new();
+    zlib_decoder.read_to_end(&mut buf).unwrap();
+    let mut iter = buf.iter();
 
-            // discard type and size
-            let _ = iter.find(|c| **c == b'\0').unwrap();
-            let data: Vec<u8> = iter.map(|c| *c).collect();
-            let data = String::from_utf8(data).unwrap();
-            print!("{data}")
-        }
-        _ => {
-            eprintln!("unknown flag {flag}")
-        }
-    }
+    // discard type and size
+    let _ = iter.find(|c| **c == b'\0').unwrap();
+    let data: Vec<u8> = iter.map(|c| *c).collect();
+    let data = String::from_utf8(data).unwrap();
+    print!("{data}")
 }
