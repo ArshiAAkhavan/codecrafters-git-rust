@@ -48,7 +48,7 @@ fn init() {
 fn cat_file(file_hash: &str) {
     let object = std::fs::File::open(format!(
         ".git/objects/{}/{}",
-        &file_hash[0..2],
+        &file_hash[..2],
         &file_hash[2..]
     ))
     .unwrap();
