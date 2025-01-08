@@ -1,4 +1,6 @@
+use std::ffi::OsString;
 use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 use std::{fs, path::PathBuf};
 
 use anyhow::Ok;
@@ -30,6 +32,7 @@ enum GitCmd {
         name_only: bool,
         hash: String,
     },
+    WriteTree,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -43,8 +46,9 @@ fn main() -> anyhow::Result<()> {
             anyhow::ensure!(pretty_print, "must pass -p flag");
             cat_file(&hash)
         }
-        GitCmd::HashObject { write, path } => hash_object(write, &path),
+        GitCmd::HashObject { write, path } => println!("{}", hash_object(write, &path)),
         GitCmd::LsTree { name_only, hash } => ls_tree(name_only, &hash),
+        GitCmd::WriteTree => println!("{}", write_tree(".")),
     }
     Ok(())
 }
@@ -71,23 +75,19 @@ fn cat_file(hash: &str) {
     print!("{data}")
 }
 
-fn hash_object(write: bool, path: &str) {
+fn hash_object(write: bool, path: &str) -> String {
     let mut object = std::fs::File::open(path).unwrap();
 
     let mut buf = Vec::new();
     let size = object.read_to_end(&mut buf).unwrap();
     let header = format!("blob {size}\0");
-    let mut hasher = sha1::Sha1::new();
-    hasher.update(&header);
-    hasher.update(&buf);
-    let sha1sum = hasher.finalize();
-    let hex_string: String = sha1sum.iter().map(|byte| format!("{:02x}", byte)).collect();
-    print!("{hex_string}");
+    let hex_string = hash_raw_object(&header, &buf);
 
     if !write {
-        return;
+        return hex_string;
     }
-    fs::create_dir_all(format!(".git/objects/{}", &hex_string[..2])).unwrap();
+
+    ensure_object_dir(&hex_string);
 
     let mut blob = header.as_bytes().to_vec();
     blob.extend(buf);
@@ -96,6 +96,7 @@ fn hash_object(write: bool, path: &str) {
     zlib_encoder.read_to_end(&mut compressed_buf).unwrap();
 
     fs::write(object_path(&hex_string), compressed_buf).unwrap();
+    return hex_string;
 }
 
 fn ls_tree(name_only: bool, hash: &str) {
@@ -105,7 +106,7 @@ fn ls_tree(name_only: bool, hash: &str) {
     let mut buf = Vec::new();
     zlib_decoder.read_to_end(&mut buf).unwrap();
 
-    #[derive(Default, Debug)]
+    #[derive(Debug)]
     struct Node {
         mode: String,
         name: String,
@@ -137,9 +138,63 @@ fn ls_tree(name_only: bool, hash: &str) {
     }
 }
 
+fn write_tree(path: &str) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut entries: Vec<fs::DirEntry> =
+        fs::read_dir(path).unwrap().filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let metadata = entry.metadata().unwrap();
+        let name = entry.file_name().to_str().unwrap().to_owned();
+        if name == ".git" {
+            continue;
+        }
+        dbg!(&entry);
+        dbg!(&metadata.is_dir());
+
+        let (mode, hash) = if metadata.is_dir() {
+            (40000, write_tree(entry.path().to_str().unwrap()))
+        } else {
+            let mode = match metadata.is_file() {
+                true => metadata.mode(),
+                false => 120_000,
+            };
+            (mode, hash_object(true, entry.path().to_str().unwrap()))
+        };
+        let entry = format!("{mode:06} {name}\0{hash}");
+        buf.extend(entry.as_bytes())
+    }
+    let header = format!("tree {}\0", buf.len());
+    let hex_string = hash_raw_object(&header, &buf);
+
+    let mut blob = header.as_bytes().to_vec();
+    dbg!(&buf.len());
+    dbg!(&buf);
+    blob.extend(buf);
+    let mut zlib_encoder = flate2::read::ZlibEncoder::new(&blob[..], flate2::Compression::none());
+    let mut compressed_buf = Vec::new();
+    zlib_encoder.read_to_end(&mut compressed_buf).unwrap();
+
+    ensure_object_dir(&hex_string);
+    fs::write(object_path(&hex_string), compressed_buf).unwrap();
+    hex_string
+}
+
 fn object_path(hash: &str) -> PathBuf {
     let mut p = PathBuf::from(".git/objects");
     p.push(&hash[..2]);
     p.push(&hash[2..]);
     p
+}
+fn ensure_object_dir(hash: &str) {
+    fs::create_dir_all(format!(".git/objects/{}", &hash[..2])).unwrap();
+}
+
+fn hash_raw_object(header: &str, body: &[u8]) -> String {
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(header);
+    hasher.update(body);
+    let sha1sum = hasher.finalize();
+    sha1sum.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
