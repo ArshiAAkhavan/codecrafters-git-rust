@@ -49,7 +49,7 @@ fn main() -> anyhow::Result<()> {
         }
         GitCmd::HashObject { write, path } => {
             let sha1sum = hash_object(write, &path)?;
-            let hex_string: String = sha1sum.iter().map(|byte| format!("{:02x}", byte)).collect();
+            let hex_string = display_hex(&sha1sum);
             println!("{hex_string}");
         }
         GitCmd::LsTree { name_only, hash } => {
@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
         }
         GitCmd::WriteTree => {
             let sha1sum = write_tree(".")?;
-            let hex_string: String = sha1sum.iter().map(|byte| format!("{:02x}", byte)).collect();
+            let hex_string = display_hex(&sha1sum);
             println!("{hex_string}");
         }
     }
@@ -103,7 +103,7 @@ fn hash_object(write: bool, path: &str) -> anyhow::Result<Vec<u8>> {
         return Ok(sha1sum);
     }
 
-    let hex_string: String = sha1sum.iter().map(|byte| format!("{:02x}", byte)).collect();
+    let hex_string = display_hex(&sha1sum);
     ensure_object_dir(&hex_string)?;
 
     let mut blob = header.as_bytes().to_vec();
@@ -199,7 +199,7 @@ fn write_tree(path: &str) -> anyhow::Result<Vec<u8>> {
     }
     let header = format!("tree {}\0", buf.len());
     let sha1sum = hash_raw_object(&header, &buf);
-    let hex_string: String = sha1sum.iter().map(|byte| format!("{:02x}", byte)).collect();
+    let hex_string = display_hex(&sha1sum);
 
     let mut blob = header.as_bytes().to_vec();
     blob.extend(buf);
@@ -229,4 +229,9 @@ fn hash_raw_object(header: &str, body: &[u8]) -> Vec<u8> {
     hasher.update(body);
     let sha1sum = hasher.finalize();
     sha1sum.to_vec()
+}
+
+fn display_hex(hash: &[u8]) -> String {
+    hash.iter()
+        .fold(String::new(), |i, b| format!("{i}{b:02x}"))
 }
