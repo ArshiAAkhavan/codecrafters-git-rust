@@ -1,10 +1,11 @@
-use std::io::Read;
+use std::fmt::Write;
+use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::{fs, path::PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Ok};
 use clap::{Parser, Subcommand};
-use sha1::Digest;
+use codecrafters_git as git;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -32,6 +33,13 @@ enum GitCmd {
         hash: String,
     },
     WriteTree,
+    CommitTree {
+        #[clap(short)]
+        parent: String,
+        #[clap(short)]
+        message: String,
+        tree: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,20 +53,27 @@ fn main() -> anyhow::Result<()> {
         }
         GitCmd::CatFile { pretty_print, hash } => {
             anyhow::ensure!(pretty_print, "must pass -p flag");
-            cat_file(&hash)?;
+            let data = cat_file(&hash)?;
+            print!("{data}")
         }
         GitCmd::HashObject { write, path } => {
             let sha1sum = hash_object(write, &path)?;
-            let hex_string = display_hex(&sha1sum);
-            println!("{hex_string}");
+            println!("{}", display_hex(&sha1sum));
         }
         GitCmd::LsTree { name_only, hash } => {
             ls_tree(name_only, &hash)?;
         }
         GitCmd::WriteTree => {
             let sha1sum = write_tree(".")?;
-            let hex_string = display_hex(&sha1sum);
-            println!("{hex_string}");
+            println!("{}", display_hex(&sha1sum));
+        }
+        GitCmd::CommitTree {
+            parent,
+            message,
+            tree,
+        } => {
+            let sha1sum = commit_tree(parent, message, tree)?;
+            println!("{}", display_hex(&sha1sum))
         }
     }
     Ok(())
@@ -73,58 +88,23 @@ fn init() -> anyhow::Result<()> {
 }
 
 fn cat_file(hash: &str) -> anyhow::Result<String> {
-    let object = std::fs::File::open(object_path(hash)).context("failed to find the hash file")?;
-    let mut zlib_decoder = flate2::read::ZlibDecoder::new(object);
-
-    let mut buf = Vec::new();
-    zlib_decoder.read_to_end(&mut buf)?;
-    let mut iter = buf.iter();
-
-    // discard type and size
-    let _ = iter
-        .find(|c| **c == b'\0')
-        .ok_or(anyhow!("malformed object"))?;
-    let data: Vec<u8> = iter.copied().collect();
-    let data = String::from_utf8(data)?;
+    let obj = git::Object::load(hash)?;
+    let data = String::from_utf8(obj.body)?;
     Ok(data)
 }
 
-fn hash_object(write: bool, path: &str) -> anyhow::Result<Vec<u8>> {
-    let mut object = std::fs::File::open(path).context("failed to open the file to hash")?;
+fn hash_object(write: bool, path: &str) -> anyhow::Result<[u8; 20]> {
+    dbg!(path);
+    let obj = git::Object::new_blob_from_file(path)?;
 
-    let mut buf = Vec::new();
-    let size = object
-        .read_to_end(&mut buf)
-        .context("failed to read from the file")?;
-    let header = format!("blob {size}\0");
-    let sha1sum = hash_raw_object(&header, &buf);
-
-    if !write {
-        return Ok(sha1sum);
+    if write {
+        obj.persist()?;
     }
-
-    let hex_string = display_hex(&sha1sum);
-    ensure_object_dir(&hex_string)?;
-
-    let mut blob = header.as_bytes().to_vec();
-    blob.extend(buf);
-    let mut zlib_encoder = flate2::read::ZlibEncoder::new(&blob[..], flate2::Compression::none());
-    let mut compressed_buf = Vec::new();
-    zlib_encoder.read_to_end(&mut compressed_buf).unwrap();
-
-    fs::write(object_path(&hex_string), compressed_buf).unwrap();
-    Ok(sha1sum)
+    Ok(obj.hash())
 }
 
 fn ls_tree(name_only: bool, hash: &str) -> anyhow::Result<()> {
-    let tree =
-        std::fs::File::open(object_path(hash)).context(format!("failed to open object {hash}"))?;
-    let mut zlib_decoder = flate2::read::ZlibDecoder::new(tree);
-
-    let mut buf = Vec::new();
-    zlib_decoder
-        .read_to_end(&mut buf)
-        .context(format!("failed to decode object {hash}"))?;
+    let obj = git::Object::load(hash)?;
 
     #[derive(Debug)]
     struct Node {
@@ -136,18 +116,15 @@ fn ls_tree(name_only: bool, hash: &str) -> anyhow::Result<()> {
     }
 
     let mut nodes = Vec::new();
-    let mut ptr = buf
-        .iter()
-        .position(|c| *c == b'\0')
-        .ok_or(anyhow!("malformed object {hash}"))?;
-    while let Some(mode_end_index) = buf[ptr..].iter().position(|c| *c == b' ') {
-        let mode = String::from_utf8(buf[ptr..ptr + mode_end_index].to_vec())?;
+    let mut ptr = 0;
+    while let Some(mode_end_index) = obj.body[ptr..].iter().position(|c| *c == b' ') {
+        let mode = String::from_utf8(obj.body[ptr..ptr + mode_end_index].to_vec())?;
         ptr += mode_end_index + 1;
 
-        if let Some(name_end_index) = buf[ptr..].iter().position(|c| *c == b'\0') {
-            let name = String::from_utf8(buf[ptr..ptr + name_end_index].to_vec())?;
+        if let Some(name_end_index) = obj.body[ptr..].iter().position(|c| *c == b'\0') {
+            let name = String::from_utf8(obj.body[ptr..ptr + name_end_index].to_vec())?;
             ptr += name_end_index + 1;
-            let hash = buf[ptr..ptr + 20].to_vec();
+            let hash = obj.body[ptr..ptr + 20].to_vec();
             ptr += 20;
             nodes.push(Node { mode, name, hash });
         } else {
@@ -164,7 +141,7 @@ fn ls_tree(name_only: bool, hash: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn write_tree(path: &str) -> anyhow::Result<Vec<u8>> {
+fn write_tree(path: &str) -> anyhow::Result<[u8; 20]> {
     let mut buf: Vec<u8> = Vec::new();
     let mut entries: Vec<fs::DirEntry> = fs::read_dir(path)
         .context(format!("failed to read dir {path}"))?
@@ -197,38 +174,32 @@ fn write_tree(path: &str) -> anyhow::Result<Vec<u8>> {
         buf.extend(format!("{mode:o} {name}\0").as_bytes());
         buf.extend(hash);
     }
-    let header = format!("tree {}\0", buf.len());
-    let sha1sum = hash_raw_object(&header, &buf);
-    let hex_string = display_hex(&sha1sum);
-
-    let mut blob = header.as_bytes().to_vec();
-    blob.extend(buf);
-    let mut zlib_encoder = flate2::read::ZlibEncoder::new(&blob[..], flate2::Compression::none());
-    let mut compressed_buf = Vec::new();
-    zlib_encoder.read_to_end(&mut compressed_buf)?;
-
-    ensure_object_dir(&hex_string)?;
-    fs::write(object_path(&hex_string), compressed_buf)?;
-    Ok(sha1sum)
+    let tree = git::Object::new(git::Kind::Tree, buf);
+    dbg!("tree");
+    tree.persist()?;
+    Ok(tree.hash())
 }
 
-fn object_path(hash: &str) -> PathBuf {
-    let mut p = PathBuf::from(".git/objects");
-    p.push(&hash[..2]);
-    p.push(&hash[2..]);
-    p
-}
-fn ensure_object_dir(hash: &str) -> anyhow::Result<()> {
-    fs::create_dir_all(format!(".git/objects/{}", &hash[..2]))
-        .context(format!("failed to create object directory for {hash}"))
-}
+fn commit_tree(parent: String, message: String, tree: String) -> anyhow::Result<[u8; 20]> {
+    const AUTHOR_NAME: &str = "ArshiAAkhavan <letmemakenewone@gmail.com>";
+    const COMMITER_NAME: &str = AUTHOR_NAME;
 
-fn hash_raw_object(header: &str, body: &[u8]) -> Vec<u8> {
-    let mut hasher = sha1::Sha1::new();
-    hasher.update(header);
-    hasher.update(body);
-    let sha1sum = hasher.finalize();
-    sha1sum.to_vec()
+    let start = SystemTime::now();
+    let time_millis = start
+        .duration_since(UNIX_EPOCH)
+        .context("Time went backwards")?
+        .as_millis();
+    let mut content = String::new();
+    writeln!(content, "tree {tree}")?;
+    writeln!(content, "parent {parent}")?;
+    writeln!(content, "author {AUTHOR_NAME} {time_millis} -0500")?;
+    writeln!(content, "committer {COMMITER_NAME} {time_millis} -0500")?;
+    writeln!(content, "\n{message}")?;
+
+    let commit = git::Object::new(git::Kind::Commit, content.as_bytes().to_owned());
+    commit.persist()?;
+
+    Ok(commit.hash())
 }
 
 fn display_hex(hash: &[u8]) -> String {
