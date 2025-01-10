@@ -1,6 +1,10 @@
+use reqwest;
 use std::fmt::Write;
 use std::fs;
+use std::io::BufRead;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Ok};
@@ -40,6 +44,10 @@ enum GitCmd {
         message: String,
         tree: String,
     },
+    Clone {
+        url: String,
+        directory: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -49,7 +57,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.cmd {
         GitCmd::Init => {
-            init()?;
+            init(&PathBuf::from("."))?;
         }
         GitCmd::CatFile { pretty_print, hash } => {
             anyhow::ensure!(pretty_print, "must pass -p flag");
@@ -75,15 +83,20 @@ fn main() -> anyhow::Result<()> {
             let sha1sum = commit_tree(parent, message, tree)?;
             println!("{}", display_hex(&sha1sum))
         }
+        GitCmd::Clone { url, directory } => {
+            git_clone(&url, &directory)?;
+        }
     }
     Ok(())
 }
 
-fn init() -> anyhow::Result<()> {
-    fs::create_dir(".git").context("failed to create the git directory")?;
-    fs::create_dir(".git/objects").context("failed to create the objects database")?;
-    fs::create_dir(".git/refs").context("failed to create the refs")?;
-    fs::write(".git/HEAD", "ref: refs/heads/master\n").context("failed to specify the HEAD")?;
+fn init(current_dir: &PathBuf) -> anyhow::Result<()> {
+    fs::create_dir(current_dir.join(".git")).context("failed to create the git directory")?;
+    fs::create_dir(current_dir.join(".git/objects"))
+        .context("failed to create the objects database")?;
+    fs::create_dir(current_dir.join(".git/refs")).context("failed to create the refs")?;
+    fs::write(current_dir.join(".git/HEAD"), "ref: refs/heads/master\n")
+        .context("failed to specify the HEAD")?;
     Ok(())
 }
 
@@ -105,38 +118,13 @@ fn hash_object(write: bool, path: &str) -> anyhow::Result<[u8; 20]> {
 
 fn ls_tree(name_only: bool, hash: &str) -> anyhow::Result<()> {
     let obj = git::Object::load(hash)?;
-
-    #[derive(Debug)]
-    struct Node {
-        #[allow(dead_code)]
-        mode: String,
-        name: String,
-        #[allow(dead_code)]
-        hash: Vec<u8>,
-    }
-
-    let mut nodes = Vec::new();
-    let mut ptr = 0;
-    while let Some(mode_end_index) = obj.body[ptr..].iter().position(|c| *c == b' ') {
-        let mode = String::from_utf8(obj.body[ptr..ptr + mode_end_index].to_vec())?;
-        ptr += mode_end_index + 1;
-
-        if let Some(name_end_index) = obj.body[ptr..].iter().position(|c| *c == b'\0') {
-            let name = String::from_utf8(obj.body[ptr..ptr + name_end_index].to_vec())?;
-            ptr += name_end_index + 1;
-            let hash = obj.body[ptr..ptr + 20].to_vec();
-            ptr += 20;
-            nodes.push(Node { mode, name, hash });
-        } else {
-            panic!("malformed tree");
-        }
-    }
+    let tree = git::Tree::try_from(obj)?;
     if name_only {
-        for node in nodes {
+        for node in tree.nodes {
             println!("{}", node.name);
         }
     } else {
-        print!("{nodes:?}");
+        print!("{tree:?}");
     }
     Ok(())
 }
@@ -174,7 +162,7 @@ fn write_tree(path: &str) -> anyhow::Result<[u8; 20]> {
         buf.extend(format!("{mode:o} {name}\0").as_bytes());
         buf.extend(hash);
     }
-    let tree = git::Object::new(git::Kind::Tree, buf);
+    let tree = git::Object::new(git::ObjectKind::Tree, buf);
     dbg!("tree");
     tree.persist()?;
     Ok(tree.hash())
@@ -196,10 +184,90 @@ fn commit_tree(parent: String, message: String, tree: String) -> anyhow::Result<
     writeln!(content, "committer {COMMITER_NAME} {time_millis} -0500")?;
     writeln!(content, "\n{message}")?;
 
-    let commit = git::Object::new(git::Kind::Commit, content.as_bytes().to_owned());
+    let commit = git::Object::new(git::ObjectKind::Commit, content.as_bytes().to_owned());
     commit.persist()?;
 
     Ok(commit.hash())
+}
+fn git_clone(url: &str, directory: &str) -> anyhow::Result<()> {
+    std::fs::create_dir_all(directory).context("failed to create the target directory")?;
+
+    let body = reqwest::blocking::get(format!("{url}/info/refs"))?;
+    let body = body.text()?;
+    let head = body
+        .lines()
+        .last()
+        .ok_or(anyhow!("malformed response for info/refs"))?;
+    let Some((hash, head_ref)) = head.split_once(char::is_whitespace) else {
+        anyhow::bail!("failed to extract HEAD commit")
+    };
+    let current_dir = PathBuf::from(directory);
+    init(&current_dir)?;
+    fs::write(".git/HEAD", format!("ref: {head_ref}\n")).context("failed to specify the HEAD")?;
+
+    fetch_commit(url, hash, &current_dir)
+}
+fn fetch_commit(url: &str, hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
+    let obj = git::Object::fetch(url, hash)?;
+    obj.persist()?;
+    for line in obj.body.lines() {
+        let line = line?;
+        let Some((obj_type, hash)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        match obj_type {
+            "tree" => {
+                fetch_tree(url, hash, &current_dir)?;
+            }
+            "parent" => {
+                fetch_commit(url, hash, &current_dir)?;
+            }
+            _ => (),
+        }
+    }
+
+    Ok(())
+}
+
+fn fetch_tree(url: &str, hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
+    eprintln!("fetching tree: {hash}");
+
+    let obj = git::Object::fetch(url, hash)?;
+    obj.persist()?;
+    let tree = git::Tree::try_from(obj)?;
+    for node in tree.nodes {
+        match node.kind {
+            git::NodeKind::Dir { .. } => {
+                let dir_path = current_dir.join(&node.name);
+                std::fs::create_dir_all(&dir_path).context(format!(
+                    "failed to create a directory for tree {}",
+                    node.name
+                ))?;
+                fetch_tree(url, &display_hex(&node.hash), &dir_path)?;
+            }
+            git::NodeKind::File { .. } | git::NodeKind::SymLink { .. } => {
+                fetch_file(url, &node, current_dir.clone())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fetch_file(url: &str, node: &git::Node, mut path: PathBuf) -> anyhow::Result<()> {
+    eprintln!("fetching file: {}", display_hex(&node.hash));
+
+    let hash = display_hex(&node.hash);
+    let obj = git::Object::fetch(url, &hash)?;
+    obj.persist()?;
+
+    // create file with correct permissions
+    path.push(&node.name);
+    std::fs::File::create(&path)?;
+    let permissions = PermissionsExt::from_mode(node.kind.mode() % (1 << 9));
+    std::fs::set_permissions(&path, permissions)?;
+
+    std::fs::write(path, obj.body)?;
+    Ok(())
 }
 
 fn display_hex(hash: &[u8]) -> String {
