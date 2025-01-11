@@ -84,7 +84,8 @@ fn main() -> anyhow::Result<()> {
             println!("{}", display_hex(&sha1sum))
         }
         GitCmd::Clone { url, directory } => {
-            git_clone(&url, &directory)?;
+            git::git_clone(&url, PathBuf::from(directory))?;
+            //git_clone_dumb(&url, &directory)?;
         }
     }
     Ok(())
@@ -189,7 +190,7 @@ fn commit_tree(parent: String, message: String, tree: String) -> anyhow::Result<
 
     Ok(commit.hash())
 }
-fn git_clone(url: &str, directory: &str) -> anyhow::Result<()> {
+fn git_clone_dumb(url: &str, directory: &str) -> anyhow::Result<()> {
     std::fs::create_dir_all(directory).context("failed to create the target directory")?;
 
     let body = reqwest::blocking::get(format!("{url}/info/refs"))?;
@@ -253,20 +254,23 @@ fn fetch_tree(url: &str, hash: &str, current_dir: &PathBuf) -> anyhow::Result<()
     Ok(())
 }
 
-fn fetch_file(url: &str, node: &git::Node, mut path: PathBuf) -> anyhow::Result<()> {
-    eprintln!("fetching file: {}", display_hex(&node.hash));
+fn fetch_file(url: &str, node: &git::Node, current_dir: PathBuf) -> anyhow::Result<()> {
+    let file_path = current_dir.join(&node.name);
+    if file_path.exists() {
+        return Ok(());
+    }
+    eprintln!("fetching file: {} [{}]", node.name, display_hex(&node.hash));
 
     let hash = display_hex(&node.hash);
     let obj = git::Object::fetch(url, &hash)?;
     obj.persist()?;
 
     // create file with correct permissions
-    path.push(&node.name);
-    std::fs::File::create(&path)?;
+    std::fs::File::create(&file_path)?;
     let permissions = PermissionsExt::from_mode(node.kind.mode() % (1 << 9));
-    std::fs::set_permissions(&path, permissions)?;
+    std::fs::set_permissions(&file_path, permissions)?;
 
-    std::fs::write(path, obj.body)?;
+    std::fs::write(&file_path, obj.body)?;
     Ok(())
 }
 
