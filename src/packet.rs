@@ -186,7 +186,7 @@ fn calculate_delta(raw: &[u8], obj_len: usize, packet: &Packet) -> anyhow::Resul
         }
     }
     let obj = crate::Object {
-        kind: crate::ObjectKind::Blob,
+        kind: base_object.kind.clone(),
         body: obj_raw,
     };
 
@@ -284,12 +284,10 @@ pub fn git_clone(url: &str, dst: PathBuf) -> anyhow::Result<()> {
         .find(|(name, _)| name == "HEAD")
         .map(|(_, hash)| hash)
         .take()
-        .ok_or(anyhow!("no HEADS in refs"))?;
-    let packet = get_objects_of_refs(&client, url, refs.clone())?;
-    for obj in packet.objects.values() {
-        obj.persist()?;
-    }
-    rebuild_directory_from_head(head_hash, &dst)?;
+        .ok_or(anyhow!("no HEADS in refs"))?
+        .to_owned();
+    let packet = get_objects_of_refs(&client, url, refs)?;
+    rebuild_directory_from_head(&head_hash, &dst, &packet)?;
 
     Ok(())
 }
@@ -319,12 +317,6 @@ fn get_objects_of_refs(
         .body(payload.data) // Send the binary data
         .send()?;
 
-    //let mut x = response.bytes()?.to_vec();
-    //x.push(0);
-    //x.push(0);
-    //x.push(0);
-    //x.push(0);
-    //Packet::try_from(Bytes::from(x))
     Packet::try_from(response.bytes()?)
 }
 
@@ -364,13 +356,20 @@ fn display_hex(hash: &[u8]) -> String {
         .fold(String::new(), |i, b| format!("{i}{b:02x}"))
 }
 
-fn rebuild_directory_from_head(head_hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
-    rebuild_commit(head_hash, current_dir)
+fn rebuild_directory_from_head(
+    head_hash: &str,
+    current_dir: &PathBuf,
+    packet: &Packet,
+) -> anyhow::Result<()> {
+    rebuild_commit(head_hash, current_dir, packet)
 }
 
-fn rebuild_commit(hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
-    let obj = crate::Object::load(hash)?;
-    obj.persist()?;
+fn rebuild_commit(hash: &str, current_dir: &PathBuf, packet: &Packet) -> anyhow::Result<()> {
+    let obj = packet
+        .objects
+        .get(&hex_to_array(hash)?)
+        .ok_or(anyhow!("failed to find {hash} in packet"))?;
+    //obj.persist()?;
     for line in obj.body.lines() {
         let line = line?;
         let Some((obj_type, hash)) = line.split_once(char::is_whitespace) else {
@@ -378,10 +377,10 @@ fn rebuild_commit(hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
         };
         match obj_type {
             "tree" => {
-                rebuild_tree(hash, &current_dir)?;
+                rebuild_tree(hash, &current_dir, packet)?;
             }
             "parent" => {
-                rebuild_commit(hash, &current_dir)?;
+                rebuild_commit(hash, &current_dir, packet)?;
             }
             _ => (),
         }
@@ -390,10 +389,14 @@ fn rebuild_commit(hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn rebuild_tree(hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
+fn rebuild_tree(hash: &str, current_dir: &PathBuf, packet: &Packet) -> anyhow::Result<()> {
     eprintln!("fetching tree: {hash}");
 
-    let obj = crate::Object::load(hash)?;
+    let obj = packet
+        .objects
+        .get(&hex_to_array(hash)?)
+        .ok_or(anyhow!("failed to find {hash} in packet"))?;
+    let obj = Object::clone(obj);
     let tree = crate::Tree::try_from(obj)?;
     for node in tree.nodes {
         match node.kind {
@@ -403,7 +406,7 @@ fn rebuild_tree(hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
                     "failed to create a directory for tree {}",
                     node.name
                 ))?;
-                rebuild_tree(&display_hex(&node.hash), &dir_path)?;
+                rebuild_tree(&display_hex(&node.hash), &dir_path, packet)?;
             }
             crate::NodeKind::File { .. } | crate::NodeKind::SymLink { .. } => {
                 rebuild_file(&node, current_dir.clone())?;
@@ -444,4 +447,17 @@ impl TryFrom<ObjectType> for ObjectKind {
             ObjectType::RefDelta | ObjectType::OfsDelta => anyhow::bail!("not an ObjectKind"),
         })
     }
+}
+
+fn hex_to_array(hex: &str) -> anyhow::Result<[u8; 20]> {
+    if hex.len() != 40 {
+        anyhow::bail!("Hex string must be 40 characters long.");
+    }
+
+    let mut array = [0u8; 20];
+    for (i, byte) in hex.as_bytes().chunks(2).enumerate() {
+        let hex_pair = std::str::from_utf8(byte)?;
+        array[i] = u8::from_str_radix(hex_pair, 16)?;
+    }
+    Ok(array)
 }

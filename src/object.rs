@@ -7,7 +7,7 @@ use std::{
     str,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Object {
     pub(crate) kind: ObjectKind,
     pub body: Vec<u8>,
@@ -112,7 +112,7 @@ impl Object {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ObjectKind {
     Blob,
     Tree,
