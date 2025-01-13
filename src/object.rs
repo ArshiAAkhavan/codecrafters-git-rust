@@ -7,8 +7,9 @@ use std::{
     str,
 };
 
+#[derive(Debug)]
 pub struct Object {
-    kind: ObjectKind,
+    pub(crate) kind: ObjectKind,
     pub body: Vec<u8>,
 }
 
@@ -40,13 +41,15 @@ impl Object {
         Ok(hash)
     }
 
+    /// loads object from the object repository using the hex represntation of its hash
     pub fn load(hex: &str) -> anyhow::Result<Self> {
         let object = std::fs::File::open(Object::path_from_hex(hex))
-            .context("failed to find the object file")?;
+            .context(format!("failed to find the object file for {hex}"))?;
         Object::new_object_from(object)
     }
 
-    fn new_object_from<R: Read>(raw: R) -> anyhow::Result<Self> {
+    /// creates new object from the byte stream
+    pub fn new_object_from<R: Read>(raw: R) -> anyhow::Result<Self> {
         let mut zlib_decoder = flate2::read::ZlibDecoder::new(raw);
 
         let mut buf = Vec::new();
@@ -70,7 +73,7 @@ impl Object {
 
     pub fn fetch(url: &str, hex: &str) -> anyhow::Result<Self> {
         let body = reqwest::blocking::get(format!("{url}/objects/{}/{}", &hex[..2], &hex[2..]))?;
-        Object::new_object_from(std::io::Cursor::new(body.bytes()?.to_vec()))
+        Self::new_object_from(std::io::Cursor::new(body.bytes()?.to_vec()))
     }
 
     fn ensure_dir(path: &Path) -> anyhow::Result<()> {
@@ -109,6 +112,7 @@ impl Object {
     }
 }
 
+#[derive(Debug)]
 pub enum ObjectKind {
     Blob,
     Tree,
