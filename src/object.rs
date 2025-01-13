@@ -22,8 +22,11 @@ impl Object {
         sha1sum.into()
     }
     pub fn persist(&self) -> anyhow::Result<[u8; 20]> {
+        self.persist_in(&PathBuf::from("."))
+    }
+    pub fn persist_in(&self, dst: &PathBuf) -> anyhow::Result<[u8; 20]> {
         let hash = self.hash();
-        let path = Object::path(&hash);
+        let path = dst.join(Object::path(&hash));
         Object::ensure_dir(
             path.parent()
                 .ok_or(anyhow!("failed to ensure parent directory for object"))?,

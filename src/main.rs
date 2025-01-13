@@ -1,4 +1,5 @@
 use reqwest;
+use std::env::current_dir;
 use std::fmt::Write;
 use std::fs;
 use std::io::BufRead;
@@ -84,7 +85,10 @@ fn main() -> anyhow::Result<()> {
             println!("{}", display_hex(&sha1sum))
         }
         GitCmd::Clone { url, directory } => {
-            git::git_clone(&url, PathBuf::from(directory))?;
+            let dst = &PathBuf::from(directory);
+            std::fs::create_dir_all(dst)?;
+            init(dst)?;
+            git::git_clone(&url, dst)?;
             //git_clone_dumb(&url, &directory)?;
         }
     }

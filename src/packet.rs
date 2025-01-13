@@ -274,7 +274,7 @@ impl IntoPackeLineIterator for bytes::Bytes {
     }
 }
 
-pub fn git_clone(url: &str, dst: PathBuf) -> anyhow::Result<()> {
+pub fn git_clone(url: &str, dst: &PathBuf) -> anyhow::Result<()> {
     std::fs::create_dir_all(&dst)?;
     let client = reqwest::blocking::Client::new();
     let refs = do_info_refs_request(&client, url)?;
@@ -287,7 +287,10 @@ pub fn git_clone(url: &str, dst: PathBuf) -> anyhow::Result<()> {
         .ok_or(anyhow!("no HEADS in refs"))?
         .to_owned();
     let packet = get_objects_of_refs(&client, url, refs)?;
-    rebuild_directory_from_head(&head_hash, &dst, &packet)?;
+    rebuild_directory_from_head(&head_hash, dst, &packet)?;
+    for obj in packet.objects.values() {
+        obj.persist_in(dst)?;
+    }
 
     Ok(())
 }
@@ -409,14 +412,14 @@ fn rebuild_tree(hash: &str, current_dir: &PathBuf, packet: &Packet) -> anyhow::R
                 rebuild_tree(&display_hex(&node.hash), &dir_path, packet)?;
             }
             crate::NodeKind::File { .. } | crate::NodeKind::SymLink { .. } => {
-                rebuild_file(&node, current_dir.clone())?;
+                rebuild_file(&node, current_dir, packet)?;
             }
         }
     }
     Ok(())
 }
 
-fn rebuild_file(node: &crate::Node, current_dir: PathBuf) -> anyhow::Result<()> {
+fn rebuild_file(node: &crate::Node, current_dir: &PathBuf, packet: &Packet) -> anyhow::Result<()> {
     let file_path = current_dir.join(&node.name);
     if file_path.exists() {
         return Ok(());
@@ -424,14 +427,17 @@ fn rebuild_file(node: &crate::Node, current_dir: PathBuf) -> anyhow::Result<()> 
     eprintln!("fetching file: {} [{}]", node.name, display_hex(&node.hash));
 
     let hash = display_hex(&node.hash);
-    let obj = crate::Object::load(&hash)?;
+    let obj = packet
+        .objects
+        .get(&hex_to_array(&hash)?)
+        .ok_or(anyhow!("failed to find {hash} in packet"))?;
 
     // create file with correct permissions
     std::fs::File::create(&file_path)?;
     let permissions = PermissionsExt::from_mode(node.kind.mode() % (1 << 9));
     std::fs::set_permissions(&file_path, permissions)?;
 
-    std::fs::write(&file_path, obj.body)?;
+    std::fs::write(&file_path, &obj.body)?;
     Ok(())
 }
 
