@@ -143,8 +143,7 @@ fn calculate_delta(raw: &[u8], obj_len: usize, packet: &Packet) -> anyhow::Resul
                 let mut ofset = 0usize;
                 let mut shift_amount = 0;
                 for _ in 0..4 {
-                    let should_copy = ofset_opcode % 2;
-                    let ofset_byte = if should_copy == 1 {
+                    let ofset_byte = if ofset_opcode % 2 == 1 {
                         ptr += 1;
                         raw[ptr - 1]
                     } else {
@@ -158,8 +157,7 @@ fn calculate_delta(raw: &[u8], obj_len: usize, packet: &Packet) -> anyhow::Resul
                 let mut len = 0;
                 let mut shift_amount = 0;
                 for _ in 0..3 {
-                    let should_copy = len_opcode % 2;
-                    let len_byte = if should_copy == 1 {
+                    let len_byte = if len_opcode % 2 == 1 {
                         ptr += 1;
                         raw[ptr - 1]
                     } else {
