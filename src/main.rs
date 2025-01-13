@@ -1,16 +1,17 @@
-use reqwest;
-use std::env::current_dir;
+use anyhow::{anyhow, Context};
+use clap::{Parser, Subcommand};
 use std::fmt::Write;
 use std::fs;
 use std::io::BufRead;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::path::PathBuf;
+use std::str;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Ok};
-use clap::{Parser, Subcommand};
 use codecrafters_git as git;
+use git::IntoPackeLineIterator;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -85,17 +86,13 @@ fn main() -> anyhow::Result<()> {
             println!("{}", display_hex(&sha1sum))
         }
         GitCmd::Clone { url, directory } => {
-            let dst = &PathBuf::from(directory);
-            std::fs::create_dir_all(dst)?;
-            init(dst)?;
-            git::git_clone(&url, dst)?;
-            //git_clone_dumb(&url, &directory)?;
+            git_clone(&url, &PathBuf::from(directory))?;
         }
     }
     Ok(())
 }
 
-fn init(current_dir: &PathBuf) -> anyhow::Result<()> {
+fn init(current_dir: &Path) -> anyhow::Result<()> {
     fs::create_dir(current_dir.join(".git")).context("failed to create the git directory")?;
     fs::create_dir(current_dir.join(".git/objects"))
         .context("failed to create the objects database")?;
@@ -194,27 +191,101 @@ fn commit_tree(parent: String, message: String, tree: String) -> anyhow::Result<
 
     Ok(commit.hash())
 }
-fn git_clone_dumb(url: &str, directory: &str) -> anyhow::Result<()> {
-    std::fs::create_dir_all(directory).context("failed to create the target directory")?;
 
-    let body = reqwest::blocking::get(format!("{url}/info/refs"))?;
-    let body = body.text()?;
-    let head = body
-        .lines()
-        .last()
-        .ok_or(anyhow!("malformed response for info/refs"))?;
-    let Some((hash, head_ref)) = head.split_once(char::is_whitespace) else {
-        anyhow::bail!("failed to extract HEAD commit")
-    };
-    let current_dir = PathBuf::from(directory);
-    init(&current_dir)?;
-    fs::write(".git/HEAD", format!("ref: {head_ref}\n")).context("failed to specify the HEAD")?;
+pub fn git_clone(url: &str, dst: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    init(dst)?;
+    let client = reqwest::blocking::Client::new();
+    let refs = do_info_refs_request(&client, url)?;
+    dbg!(&refs);
+    let head_hash = refs
+        .iter()
+        .find(|(name, _)| name == "HEAD")
+        .map(|(_, hash)| hash)
+        .take()
+        .ok_or(anyhow!("no HEADS in refs"))?
+        .to_owned();
+    let packet = get_objects_of_refs(&client, url, refs)?;
+    rebuild_directory_from_head(&head_hash, dst, &packet)?;
+    for obj in packet.objects.values() {
+        obj.persist_in(dst)?;
+    }
 
-    fetch_commit(url, hash, &current_dir)
+    Ok(())
 }
-fn fetch_commit(url: &str, hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
-    let obj = git::Object::fetch(url, hash)?;
-    obj.persist()?;
+
+fn get_objects_of_refs(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    refs: Vec<(String, String)>,
+) -> anyhow::Result<git::Packet> {
+    let mut plb = git::PacketLineBuilder::new();
+    for (name, hash) in refs {
+        println!("{name}: {hash}");
+        plb.want(hash);
+    }
+    let payload = plb.build();
+
+    let response = client
+        .post(format!("{url}/git-upload-pack"))
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-git-upload-pack-request",
+        )
+        .header(
+            reqwest::header::ACCEPT,
+            "application/x-git-upload-pack-result",
+        )
+        .body(payload.data) // Send the binary data
+        .send()?;
+
+    git::Packet::try_from(response.bytes()?)
+}
+
+fn do_info_refs_request(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let url = format!("{url}/info/refs");
+
+    let response = client
+        .get(url)
+        .query(&[("service", "git-upload-pack")])
+        .send()?;
+
+    let body = response.bytes()?;
+    let mut refs = Vec::new();
+    for packet_line in body
+        .into_packet_line_iter()
+        .skip_while(|p| !p.is_empty())
+        .skip(1)
+        .take_while(|p| !p.is_empty())
+    {
+        let pos = packet_line
+            .data
+            .iter()
+            .position(|c| *c == b'\0' || *c == b'\n')
+            .unwrap_or(packet_line.len());
+        let name = str::from_utf8(&packet_line.data[41..pos])?;
+        let hash = str::from_utf8(&packet_line.data[..40])?.into();
+        refs.push((name.into(), hash));
+    }
+    Ok(refs)
+}
+
+fn rebuild_directory_from_head(
+    head_hash: &str,
+    current_dir: &Path,
+    packet: &git::Packet,
+) -> anyhow::Result<()> {
+    rebuild_commit(head_hash, current_dir, packet)
+}
+
+fn rebuild_commit(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
+    let obj = packet
+        .objects
+        .get(&hex_to_array(hash)?)
+        .ok_or(anyhow!("failed to find {hash} in packet"))?;
     for line in obj.body.lines() {
         let line = line?;
         let Some((obj_type, hash)) = line.split_once(char::is_whitespace) else {
@@ -222,10 +293,10 @@ fn fetch_commit(url: &str, hash: &str, current_dir: &PathBuf) -> anyhow::Result<
         };
         match obj_type {
             "tree" => {
-                fetch_tree(url, hash, &current_dir)?;
+                rebuild_tree(hash, current_dir, packet)?;
             }
             "parent" => {
-                fetch_commit(url, hash, &current_dir)?;
+                rebuild_commit(hash, current_dir, packet)?;
             }
             _ => (),
         }
@@ -234,11 +305,14 @@ fn fetch_commit(url: &str, hash: &str, current_dir: &PathBuf) -> anyhow::Result<
     Ok(())
 }
 
-fn fetch_tree(url: &str, hash: &str, current_dir: &PathBuf) -> anyhow::Result<()> {
+fn rebuild_tree(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
     eprintln!("fetching tree: {hash}");
 
-    let obj = git::Object::fetch(url, hash)?;
-    obj.persist()?;
+    let obj = packet
+        .objects
+        .get(&hex_to_array(hash)?)
+        .ok_or(anyhow!("failed to find {hash} in packet"))?;
+    let obj = git::Object::clone(obj);
     let tree = git::Tree::try_from(obj)?;
     for node in tree.nodes {
         match node.kind {
@@ -248,17 +322,17 @@ fn fetch_tree(url: &str, hash: &str, current_dir: &PathBuf) -> anyhow::Result<()
                     "failed to create a directory for tree {}",
                     node.name
                 ))?;
-                fetch_tree(url, &display_hex(&node.hash), &dir_path)?;
+                rebuild_tree(&display_hex(&node.hash), &dir_path, packet)?;
             }
             git::NodeKind::File { .. } | git::NodeKind::SymLink { .. } => {
-                fetch_file(url, &node, current_dir.clone())?;
+                rebuild_file(&node, current_dir, packet)?;
             }
         }
     }
     Ok(())
 }
 
-fn fetch_file(url: &str, node: &git::Node, current_dir: PathBuf) -> anyhow::Result<()> {
+fn rebuild_file(node: &git::Node, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
     let file_path = current_dir.join(&node.name);
     if file_path.exists() {
         return Ok(());
@@ -266,19 +340,34 @@ fn fetch_file(url: &str, node: &git::Node, current_dir: PathBuf) -> anyhow::Resu
     eprintln!("fetching file: {} [{}]", node.name, display_hex(&node.hash));
 
     let hash = display_hex(&node.hash);
-    let obj = git::Object::fetch(url, &hash)?;
-    obj.persist()?;
+    let obj = packet
+        .objects
+        .get(&hex_to_array(&hash)?)
+        .ok_or(anyhow!("failed to find {hash} in packet"))?;
 
     // create file with correct permissions
     std::fs::File::create(&file_path)?;
     let permissions = PermissionsExt::from_mode(node.kind.mode() % (1 << 9));
     std::fs::set_permissions(&file_path, permissions)?;
 
-    std::fs::write(&file_path, obj.body)?;
+    std::fs::write(&file_path, &obj.body)?;
     Ok(())
 }
 
 fn display_hex(hash: &[u8]) -> String {
     hash.iter()
         .fold(String::new(), |i, b| format!("{i}{b:02x}"))
+}
+
+fn hex_to_array(hex: &str) -> anyhow::Result<[u8; 20]> {
+    if hex.len() != 40 {
+        anyhow::bail!("Hex string must be 40 characters long.");
+    }
+
+    let mut array = [0u8; 20];
+    for (i, byte) in hex.as_bytes().chunks(2).enumerate() {
+        let hex_pair = std::str::from_utf8(byte)?;
+        array[i] = u8::from_str_radix(hex_pair, 16)?;
+    }
+    Ok(array)
 }

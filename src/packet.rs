@@ -1,20 +1,16 @@
-use anyhow::{anyhow, Context};
-use reqwest;
+use anyhow::anyhow;
 
 use std::collections::HashMap;
-use std::io::BufRead;
 use std::io::Read;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
-use std::{str, usize};
+use std::str;
 
 use crate::object::Object;
 use crate::ObjectKind;
 
 #[derive(Debug)]
-struct Packet {
-    objects: HashMap<[u8; 20], Object>,
+pub struct Packet {
+    pub objects: HashMap<[u8; 20], Object>,
 }
 
 #[derive(Debug)]
@@ -47,7 +43,7 @@ impl TryFrom<bytes::Bytes> for Packet {
     type Error = anyhow::Error;
 
     fn try_from(raw: bytes::Bytes) -> Result<Self, Self::Error> {
-        let pos = raw.iter().position(|c| *c == b'\n').unwrap_or_default() as usize;
+        let pos = raw.iter().position(|c| *c == b'\n').unwrap_or_default();
         let original_raw = &raw[..raw.len() - 20];
         let raw = &raw[pos + 1..];
         let magic_prefix = &raw[..4];
@@ -71,7 +67,7 @@ impl TryFrom<bytes::Bytes> for Packet {
             while obj_len_byte & 0b1000_0000 != 0 {
                 ptr += 1;
                 obj_len_byte = raw[ptr];
-                obj_len = obj_len + (((obj_len_byte & 0b0111_1111) as usize) << shift_count);
+                obj_len += ((obj_len_byte & 0b0111_1111) as usize) << shift_count;
                 shift_count += 8;
             }
             ptr += 1;
@@ -156,7 +152,7 @@ fn calculate_delta(raw: &[u8], obj_len: usize, packet: &Packet) -> anyhow::Resul
                     } else {
                         0
                     };
-                    ofset = ofset + ((ofset_byte as usize) << shift_amount);
+                    ofset += (ofset_byte as usize) << shift_amount;
                     shift_amount += 8;
                     ofset_opcode >>= 1;
                 }
@@ -171,7 +167,7 @@ fn calculate_delta(raw: &[u8], obj_len: usize, packet: &Packet) -> anyhow::Resul
                     } else {
                         0
                     };
-                    len = len + ((len_byte as usize) << shift_amount);
+                    len += (len_byte as usize) << shift_amount;
                     shift_amount += 8;
                     len_opcode >>= 1;
                 }
@@ -194,29 +190,34 @@ fn calculate_delta(raw: &[u8], obj_len: usize, packet: &Packet) -> anyhow::Resul
 }
 
 #[derive(Debug)]
-struct PacketLine {
-    data: Vec<u8>,
+pub struct PacketLine {
+    pub data: Vec<u8>,
 }
 
 impl PacketLine {
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
-struct PacketLineBuilder {
+#[derive(Default)]
+pub struct PacketLineBuilder {
     wants: Vec<String>,
 }
 impl PacketLineBuilder {
-    fn new() -> Self {
-        Self { wants: Vec::new() }
+    pub fn new() -> Self {
+        Default::default()
     }
 
-    fn want(&mut self, hex: String) {
+    pub fn want(&mut self, hex: String) {
         self.wants.push(hex)
     }
 
-    fn build(self) -> PacketLine {
+    pub fn build(self) -> PacketLine {
         let mut data = Vec::new();
         for hex in self.wants {
             let _ = writeln!(data, "{:04x}want {hex}", 4 + 5 + hex.len() + 1);
@@ -248,7 +249,7 @@ impl<'a> TryFrom<&'a [u8]> for PacketLine {
     }
 }
 
-struct PacketLineIterator {
+pub struct PacketLineIterator {
     stream: Vec<u8>,
 }
 
@@ -262,7 +263,7 @@ impl Iterator for PacketLineIterator {
     }
 }
 
-trait IntoPackeLineIterator {
+pub trait IntoPackeLineIterator {
     fn into_packet_line_iter(self) -> PacketLineIterator;
 }
 
@@ -272,173 +273,6 @@ impl IntoPackeLineIterator for bytes::Bytes {
             stream: self.to_vec(),
         }
     }
-}
-
-pub fn git_clone(url: &str, dst: &PathBuf) -> anyhow::Result<()> {
-    std::fs::create_dir_all(&dst)?;
-    let client = reqwest::blocking::Client::new();
-    let refs = do_info_refs_request(&client, url)?;
-    dbg!(&refs);
-    let head_hash = refs
-        .iter()
-        .find(|(name, _)| name == "HEAD")
-        .map(|(_, hash)| hash)
-        .take()
-        .ok_or(anyhow!("no HEADS in refs"))?
-        .to_owned();
-    let packet = get_objects_of_refs(&client, url, refs)?;
-    rebuild_directory_from_head(&head_hash, dst, &packet)?;
-    for obj in packet.objects.values() {
-        obj.persist_in(dst)?;
-    }
-
-    Ok(())
-}
-
-fn get_objects_of_refs(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    refs: Vec<(String, String)>,
-) -> anyhow::Result<Packet> {
-    let mut plb = PacketLineBuilder::new();
-    for (name, hash) in refs {
-        println!("{name}: {hash}");
-        plb.want(hash);
-    }
-    let payload = plb.build();
-
-    let response = client
-        .post(format!("{url}/git-upload-pack"))
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            "application/x-git-upload-pack-request",
-        )
-        .header(
-            reqwest::header::ACCEPT,
-            "application/x-git-upload-pack-result",
-        )
-        .body(payload.data) // Send the binary data
-        .send()?;
-
-    Packet::try_from(response.bytes()?)
-}
-
-fn do_info_refs_request(
-    client: &reqwest::blocking::Client,
-    url: &str,
-) -> anyhow::Result<Vec<(String, String)>> {
-    let url = format!("{url}/info/refs");
-
-    let response = client
-        .get(url)
-        .query(&[("service", "git-upload-pack")])
-        .send()?;
-
-    let body = response.bytes()?;
-    let mut refs = Vec::new();
-    for packet_line in body
-        .into_packet_line_iter()
-        .skip_while(|p| p.len() != 0)
-        .skip(1)
-        .take_while(|p| p.len() != 0)
-    {
-        let pos = packet_line
-            .data
-            .iter()
-            .position(|c| *c == b'\0' || *c == b'\n')
-            .unwrap_or(packet_line.len());
-        let name = str::from_utf8(&packet_line.data[41..pos])?;
-        let hash = str::from_utf8(&packet_line.data[..40])?.into();
-        refs.push((name.into(), hash));
-    }
-    Ok(refs)
-}
-
-fn display_hex(hash: &[u8]) -> String {
-    hash.iter()
-        .fold(String::new(), |i, b| format!("{i}{b:02x}"))
-}
-
-fn rebuild_directory_from_head(
-    head_hash: &str,
-    current_dir: &PathBuf,
-    packet: &Packet,
-) -> anyhow::Result<()> {
-    rebuild_commit(head_hash, current_dir, packet)
-}
-
-fn rebuild_commit(hash: &str, current_dir: &PathBuf, packet: &Packet) -> anyhow::Result<()> {
-    let obj = packet
-        .objects
-        .get(&hex_to_array(hash)?)
-        .ok_or(anyhow!("failed to find {hash} in packet"))?;
-    //obj.persist()?;
-    for line in obj.body.lines() {
-        let line = line?;
-        let Some((obj_type, hash)) = line.split_once(char::is_whitespace) else {
-            continue;
-        };
-        match obj_type {
-            "tree" => {
-                rebuild_tree(hash, &current_dir, packet)?;
-            }
-            "parent" => {
-                rebuild_commit(hash, &current_dir, packet)?;
-            }
-            _ => (),
-        }
-    }
-
-    Ok(())
-}
-
-fn rebuild_tree(hash: &str, current_dir: &PathBuf, packet: &Packet) -> anyhow::Result<()> {
-    eprintln!("fetching tree: {hash}");
-
-    let obj = packet
-        .objects
-        .get(&hex_to_array(hash)?)
-        .ok_or(anyhow!("failed to find {hash} in packet"))?;
-    let obj = Object::clone(obj);
-    let tree = crate::Tree::try_from(obj)?;
-    for node in tree.nodes {
-        match node.kind {
-            crate::NodeKind::Dir { .. } => {
-                let dir_path = current_dir.join(&node.name);
-                std::fs::create_dir_all(&dir_path).context(format!(
-                    "failed to create a directory for tree {}",
-                    node.name
-                ))?;
-                rebuild_tree(&display_hex(&node.hash), &dir_path, packet)?;
-            }
-            crate::NodeKind::File { .. } | crate::NodeKind::SymLink { .. } => {
-                rebuild_file(&node, current_dir, packet)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn rebuild_file(node: &crate::Node, current_dir: &PathBuf, packet: &Packet) -> anyhow::Result<()> {
-    let file_path = current_dir.join(&node.name);
-    if file_path.exists() {
-        return Ok(());
-    }
-    eprintln!("fetching file: {} [{}]", node.name, display_hex(&node.hash));
-
-    let hash = display_hex(&node.hash);
-    let obj = packet
-        .objects
-        .get(&hex_to_array(&hash)?)
-        .ok_or(anyhow!("failed to find {hash} in packet"))?;
-
-    // create file with correct permissions
-    std::fs::File::create(&file_path)?;
-    let permissions = PermissionsExt::from_mode(node.kind.mode() % (1 << 9));
-    std::fs::set_permissions(&file_path, permissions)?;
-
-    std::fs::write(&file_path, &obj.body)?;
-    Ok(())
 }
 
 impl TryFrom<ObjectType> for ObjectKind {
@@ -455,15 +289,7 @@ impl TryFrom<ObjectType> for ObjectKind {
     }
 }
 
-fn hex_to_array(hex: &str) -> anyhow::Result<[u8; 20]> {
-    if hex.len() != 40 {
-        anyhow::bail!("Hex string must be 40 characters long.");
-    }
-
-    let mut array = [0u8; 20];
-    for (i, byte) in hex.as_bytes().chunks(2).enumerate() {
-        let hex_pair = std::str::from_utf8(byte)?;
-        array[i] = u8::from_str_radix(hex_pair, 16)?;
-    }
-    Ok(array)
+fn display_hex(hash: &[u8]) -> String {
+    hash.iter()
+        .fold(String::new(), |i, b| format!("{i}{b:02x}"))
 }

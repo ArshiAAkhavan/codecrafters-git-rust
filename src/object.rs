@@ -24,7 +24,7 @@ impl Object {
     pub fn persist(&self) -> anyhow::Result<[u8; 20]> {
         self.persist_in(&PathBuf::from("."))
     }
-    pub fn persist_in(&self, dst: &PathBuf) -> anyhow::Result<[u8; 20]> {
+    pub fn persist_in(&self, dst: &Path) -> anyhow::Result<[u8; 20]> {
         let hash = self.hash();
         let path = dst.join(Object::path(&hash));
         Object::ensure_dir(
@@ -72,11 +72,6 @@ impl Object {
             kind,
             body: buf[body_position + 1..].to_owned(),
         })
-    }
-
-    pub fn fetch(url: &str, hex: &str) -> anyhow::Result<Self> {
-        let body = reqwest::blocking::get(format!("{url}/objects/{}/{}", &hex[..2], &hex[2..]))?;
-        Self::new_object_from(std::io::Cursor::new(body.bytes()?.to_vec()))
     }
 
     fn ensure_dir(path: &Path) -> anyhow::Result<()> {
