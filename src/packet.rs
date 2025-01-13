@@ -44,8 +44,7 @@ impl TryFrom<bytes::Bytes> for Packet {
 
     fn try_from(raw: bytes::Bytes) -> Result<Self, Self::Error> {
         let pos = raw.iter().position(|c| *c == b'\n').unwrap_or_default();
-        let original_raw = &raw[..raw.len() - 20];
-        let raw = &raw[pos + 1..];
+        let raw = &raw[pos + 1..raw.len() - 20];
         let magic_prefix = &raw[..4];
         assert_eq!(magic_prefix, b"PACK");
 
@@ -56,8 +55,8 @@ impl TryFrom<bytes::Bytes> for Packet {
             objects: HashMap::with_capacity(num_objects),
         };
 
-        let raw = original_raw;
-        let mut ptr = 12 + pos + 1;
+        //let raw = original_raw;
+        let mut ptr = 12;
         while ptr < raw.len() {
             let obj_type_byte = raw[ptr];
             let obj_type = ObjectType::try_from((obj_type_byte & 0b0111_0000) >> 4)?;
