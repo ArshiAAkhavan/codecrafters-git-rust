@@ -196,17 +196,17 @@ pub fn git_clone(url: &str, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     init(dst)?;
     let client = reqwest::blocking::Client::new();
-    let refs = do_info_refs_request(&client, url)?;
+    let refs = fetch_refs(&client, url)?;
     dbg!(&refs);
     let head_hash = refs
         .iter()
         .find(|(name, _)| name == "HEAD")
         .map(|(_, hash)| hash)
         .take()
-        .ok_or(anyhow!("no HEADS in refs"))?
+        .ok_or(anyhow!("no HEADs in refs"))?
         .to_owned();
-    let packet = get_objects_of_refs(&client, url, refs)?;
-    rebuild_directory_from_head(&head_hash, dst, &packet)?;
+    let packet = fetch_objects(&client, url, refs)?;
+    build_from_head(&head_hash, dst, &packet)?;
     for obj in packet.objects.values() {
         obj.persist_in(dst)?;
     }
@@ -214,7 +214,7 @@ pub fn git_clone(url: &str, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn get_objects_of_refs(
+fn fetch_objects(
     client: &reqwest::blocking::Client,
     url: &str,
     refs: Vec<(String, String)>,
@@ -236,13 +236,13 @@ fn get_objects_of_refs(
             reqwest::header::ACCEPT,
             "application/x-git-upload-pack-result",
         )
-        .body(payload.data) // Send the binary data
+        .body(payload.data)
         .send()?;
 
     git::Packet::try_from(response.bytes()?)
 }
 
-fn do_info_refs_request(
+fn fetch_refs(
     client: &reqwest::blocking::Client,
     url: &str,
 ) -> anyhow::Result<Vec<(String, String)>> {
@@ -273,15 +273,15 @@ fn do_info_refs_request(
     Ok(refs)
 }
 
-fn rebuild_directory_from_head(
+fn build_from_head(
     head_hash: &str,
     current_dir: &Path,
     packet: &git::Packet,
 ) -> anyhow::Result<()> {
-    rebuild_commit(head_hash, current_dir, packet)
+    build_commit(head_hash, current_dir, packet)
 }
 
-fn rebuild_commit(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
+fn build_commit(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
     let obj = packet
         .objects
         .get(&hex_to_array(hash)?)
@@ -293,10 +293,10 @@ fn rebuild_commit(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyho
         };
         match obj_type {
             "tree" => {
-                rebuild_tree(hash, current_dir, packet)?;
+                build_tree(hash, current_dir, packet)?;
             }
             "parent" => {
-                rebuild_commit(hash, current_dir, packet)?;
+                build_commit(hash, current_dir, packet)?;
             }
             _ => (),
         }
@@ -305,7 +305,7 @@ fn rebuild_commit(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyho
     Ok(())
 }
 
-fn rebuild_tree(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
+fn build_tree(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
     eprintln!("fetching tree: {hash}");
 
     let obj = packet
@@ -322,17 +322,17 @@ fn rebuild_tree(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow:
                     "failed to create a directory for tree {}",
                     node.name
                 ))?;
-                rebuild_tree(&display_hex(&node.hash), &dir_path, packet)?;
+                build_tree(&display_hex(&node.hash), &dir_path, packet)?;
             }
             git::NodeKind::File { .. } | git::NodeKind::SymLink { .. } => {
-                rebuild_file(&node, current_dir, packet)?;
+                build_file(&node, current_dir, packet)?;
             }
         }
     }
     Ok(())
 }
 
-fn rebuild_file(node: &git::Node, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
+fn build_file(node: &git::Node, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
     let file_path = current_dir.join(&node.name);
     if file_path.exists() {
         return Ok(());

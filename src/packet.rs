@@ -55,7 +55,6 @@ impl TryFrom<bytes::Bytes> for Packet {
             objects: HashMap::with_capacity(num_objects),
         };
 
-        //let raw = original_raw;
         let mut ptr = 12;
         while ptr < raw.len() {
             let obj_type_byte = raw[ptr];
