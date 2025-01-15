@@ -43,8 +43,12 @@ impl TryFrom<bytes::Bytes> for Packet {
     type Error = anyhow::Error;
 
     fn try_from(raw: bytes::Bytes) -> Result<Self, Self::Error> {
+        // skip till the first line
         let pos = raw.iter().position(|c| *c == b'\n').unwrap_or_default();
+
+        // the last 20 bytes are for checksum
         let raw = &raw[pos + 1..raw.len() - 20];
+
         let magic_prefix = &raw[..4];
         assert_eq!(magic_prefix, b"PACK");
 
@@ -55,10 +59,12 @@ impl TryFrom<bytes::Bytes> for Packet {
             objects: HashMap::with_capacity(num_objects),
         };
 
+        // header size
         let mut ptr = 12;
         while ptr < raw.len() {
             let obj_type_byte = raw[ptr];
             let obj_type = ObjectType::try_from((obj_type_byte & 0b0111_0000) >> 4)?;
+
             let mut obj_len_byte = raw[ptr];
             let mut obj_len = (obj_len_byte & 0b1111) as usize;
             let mut shift_count = 4;
@@ -153,6 +159,7 @@ fn calculate_delta(raw: &[u8], obj_len: usize, packet: &Packet) -> anyhow::Resul
                     shift_amount += 8;
                     ofset_opcode >>= 1;
                 }
+
                 let mut len_opcode = (instruction >> 4) % 0b1000;
                 let mut len = 0;
                 let mut shift_amount = 0;

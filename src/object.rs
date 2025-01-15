@@ -87,10 +87,7 @@ impl Object {
         p
     }
     fn path(hash: &[u8]) -> PathBuf {
-        let hex = hash
-            .iter()
-            .fold(String::new(), |i, b| format!("{i}{b:02x}"));
-        Self::path_from_hex(&hex)
+        Self::path_from_hex(&hex::encode(hash))
     }
 }
 
