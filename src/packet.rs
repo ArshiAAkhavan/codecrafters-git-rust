@@ -92,7 +92,7 @@ impl TryFrom<bytes::Bytes> for Packet {
                     )
                 }
             };
-            eprintln!("unpacked {}:\t{}", obj.kind, (display_hex(&obj.hash())));
+            eprintln!("unpacked {}:\t{}", obj.kind, (hex::encode(&obj.hash())));
             packet.objects.insert(obj.hash(), obj);
             ptr += nbytes;
         }
@@ -129,7 +129,7 @@ fn calculate_delta(raw: &[u8], obj_len: usize, packet: &Packet) -> anyhow::Resul
     let base_object = packet
         .objects
         .get(base_hash)
-        .ok_or(anyhow!("failed to find object {}", display_hex(base_hash)))?;
+        .ok_or(anyhow!("failed to find object {}", hex::encode(base_hash)))?;
 
     let mut obj_raw = Vec::new();
     while ptr < raw.len() {
@@ -283,9 +283,4 @@ impl TryFrom<ObjectType> for ObjectKind {
             ObjectType::RefDelta | ObjectType::OfsDelta => anyhow::bail!("not an ObjectKind"),
         })
     }
-}
-
-fn display_hex(hash: &[u8]) -> String {
-    hash.iter()
-        .fold(String::new(), |i, b| format!("{i}{b:02x}"))
 }

@@ -64,18 +64,20 @@ fn main() -> anyhow::Result<()> {
         GitCmd::CatFile { pretty_print, hash } => {
             anyhow::ensure!(pretty_print, "must pass -p flag");
             let data = cat_file(&hash)?;
-            print!("{data}")
+
+            use std::io::Write;
+            std::io::stdout().write_all(&data)?;
         }
         GitCmd::HashObject { write, path } => {
             let sha1sum = hash_object(write, &path)?;
-            println!("{}", display_hex(&sha1sum));
+            println!("{}", hex::encode(&sha1sum));
         }
         GitCmd::LsTree { name_only, hash } => {
             ls_tree(name_only, &hash)?;
         }
         GitCmd::WriteTree => {
             let sha1sum = write_tree(".")?;
-            println!("{}", display_hex(&sha1sum));
+            println!("{}", hex::encode(&sha1sum));
         }
         GitCmd::CommitTree {
             parent,
@@ -83,7 +85,7 @@ fn main() -> anyhow::Result<()> {
             tree,
         } => {
             let sha1sum = commit_tree(parent, message, tree)?;
-            println!("{}", display_hex(&sha1sum))
+            println!("{}", hex::encode(&sha1sum))
         }
         GitCmd::Clone { url, directory } => {
             git_clone(&url, &PathBuf::from(directory))?;
@@ -102,14 +104,12 @@ fn init(current_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cat_file(hash: &str) -> anyhow::Result<String> {
+fn cat_file(hash: &str) -> anyhow::Result<Vec<u8>> {
     let obj = git::Object::load(hash)?;
-    let data = String::from_utf8(obj.body)?;
-    Ok(data)
+    Ok(obj.body)
 }
 
 fn hash_object(write: bool, path: &str) -> anyhow::Result<[u8; 20]> {
-    dbg!(path);
     let obj = git::Object::new_blob_from_file(path)?;
 
     if write {
@@ -141,7 +141,7 @@ fn write_tree(path: &str) -> anyhow::Result<[u8; 20]> {
 
     for entry in entries {
         let metadata = entry.metadata()?;
-        let name = entry.file_name().to_str().unwrap_or_default().to_owned();
+        let name = entry.file_name();
         if name == ".git" {
             continue;
         }
@@ -161,11 +161,12 @@ fn write_tree(path: &str) -> anyhow::Result<[u8; 20]> {
                 hash_object(true, entry.path().to_str().unwrap_or_default())?,
             )
         };
-        buf.extend(format!("{mode:o} {name}\0").as_bytes());
+        buf.extend(format!("{mode:o} ").as_bytes());
+        buf.extend(name.as_encoded_bytes());
+        buf.extend([0u8; 1]);
         buf.extend(hash);
     }
     let tree = git::Object::new(git::ObjectKind::Tree, buf);
-    dbg!("tree");
     tree.persist()?;
     Ok(tree.hash())
 }
@@ -197,7 +198,6 @@ pub fn git_clone(url: &str, dst: &Path) -> anyhow::Result<()> {
     init(dst)?;
     let client = reqwest::blocking::Client::new();
     let refs = fetch_refs(&client, url)?;
-    dbg!(&refs);
     let head_hash = refs
         .iter()
         .find(|(name, _)| name == "HEAD")
@@ -220,8 +220,7 @@ fn fetch_objects(
     refs: Vec<(String, String)>,
 ) -> anyhow::Result<git::Packet> {
     let mut plb = git::PacketLineBuilder::new();
-    for (name, hash) in refs {
-        println!("{name}: {hash}");
+    for (_, hash) in refs {
         plb.want(hash);
     }
     let payload = plb.build();
@@ -284,7 +283,7 @@ fn build_from_head(
 fn build_commit(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow::Result<()> {
     let obj = packet
         .objects
-        .get(&hex_to_array(hash)?)
+        .get(hex::decode(hash)?.as_slice())
         .ok_or(anyhow!("failed to find {hash} in packet"))?;
     for line in obj.body.lines() {
         let line = line?;
@@ -310,7 +309,7 @@ fn build_tree(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow::R
 
     let obj = packet
         .objects
-        .get(&hex_to_array(hash)?)
+        .get(hex::decode(hash)?.as_slice())
         .ok_or(anyhow!("failed to find {hash} in packet"))?;
     let obj = git::Object::clone(obj);
     let tree = git::Tree::try_from(obj)?;
@@ -322,7 +321,7 @@ fn build_tree(hash: &str, current_dir: &Path, packet: &git::Packet) -> anyhow::R
                     "failed to create a directory for tree {}",
                     node.name
                 ))?;
-                build_tree(&display_hex(&node.hash), &dir_path, packet)?;
+                build_tree(&hex::encode(&node.hash), &dir_path, packet)?;
             }
             git::NodeKind::File { .. } | git::NodeKind::SymLink { .. } => {
                 build_file(&node, current_dir, packet)?;
@@ -337,12 +336,12 @@ fn build_file(node: &git::Node, current_dir: &Path, packet: &git::Packet) -> any
     if file_path.exists() {
         return Ok(());
     }
-    eprintln!("fetching file: {} [{}]", node.name, display_hex(&node.hash));
+    eprintln!("fetching file: {} [{}]", node.name, hex::encode(&node.hash));
 
-    let hash = display_hex(&node.hash);
+    let hash = hex::encode(&node.hash);
     let obj = packet
         .objects
-        .get(&hex_to_array(&hash)?)
+        .get(hex::decode(&hash)?.as_slice())
         .ok_or(anyhow!("failed to find {hash} in packet"))?;
 
     // create file with correct permissions
@@ -352,22 +351,4 @@ fn build_file(node: &git::Node, current_dir: &Path, packet: &git::Packet) -> any
 
     std::fs::write(&file_path, &obj.body)?;
     Ok(())
-}
-
-fn display_hex(hash: &[u8]) -> String {
-    hash.iter()
-        .fold(String::new(), |i, b| format!("{i}{b:02x}"))
-}
-
-fn hex_to_array(hex: &str) -> anyhow::Result<[u8; 20]> {
-    if hex.len() != 40 {
-        anyhow::bail!("Hex string must be 40 characters long.");
-    }
-
-    let mut array = [0u8; 20];
-    for (i, byte) in hex.as_bytes().chunks(2).enumerate() {
-        let hex_pair = std::str::from_utf8(byte)?;
-        array[i] = u8::from_str_radix(hex_pair, 16)?;
-    }
-    Ok(array)
 }

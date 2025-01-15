@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Ok};
 use sha1::Digest;
 use std::{
     fmt::Display,
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     str,
 };
@@ -53,25 +53,27 @@ impl Object {
 
     /// creates new object from the byte stream
     pub fn new_object_from<R: Read>(raw: R) -> anyhow::Result<Self> {
-        let mut zlib_decoder = flate2::read::ZlibDecoder::new(raw);
+        let zlib_decoder = flate2::read::ZlibDecoder::new(raw);
+        let mut r = BufReader::new(zlib_decoder);
 
+        //zlib_decoder.read_to_end(&mut buf)?;
         let mut buf = Vec::new();
-        zlib_decoder.read_to_end(&mut buf)?;
-        let space_position = buf
-            .iter()
-            .position(|c| *c == b' ')
-            .ok_or(anyhow!("malformed object"))?;
-        let kind = ObjectKind::try_from(&buf[..space_position])?;
 
-        let body_position = buf
-            .iter()
-            .position(|c| *c == b'\0')
-            .ok_or(anyhow!("malformed object"))?;
+        // read object type
+        r.read_until(b' ', &mut buf)?;
+        // ignore the last space
+        let kind = ObjectKind::try_from(&buf[..buf.len() - 1])?;
+        buf.clear();
 
-        Ok(Self {
-            kind,
-            body: buf[body_position + 1..].to_owned(),
-        })
+        // read object size
+        r.read_until(b'\0', &mut buf)?;
+        // ignore the last \0
+        let size: usize = str::from_utf8(&buf[..buf.len() - 1])?.parse()?;
+        buf.resize(size, 0);
+
+        r.read_exact(&mut buf)?;
+
+        Ok(Self { kind, body: buf })
     }
 
     fn ensure_dir(path: &Path) -> anyhow::Result<()> {
@@ -136,7 +138,7 @@ impl TryFrom<&[u8]> for ObjectKind {
             "blob" => Ok(Self::Blob),
             "tree" => Ok(Self::Tree),
             "commit" => Ok(Self::Commit),
-            kind => anyhow::bail!("unknown object format! {kind}"),
+            kind => anyhow::bail!("unknown object format! [{kind}]"),
         }
     }
 }
