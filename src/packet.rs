@@ -72,7 +72,7 @@ impl TryFrom<bytes::Bytes> for Packet {
                 ptr += 1;
                 obj_len_byte = raw[ptr];
                 obj_len += ((obj_len_byte & 0b0111_1111) as usize) << shift_count;
-                shift_count += 8;
+                shift_count += 7;
             }
             ptr += 1;
 
@@ -86,7 +86,9 @@ impl TryFrom<bytes::Bytes> for Packet {
                     let mut zlib_decoder = flate2::bufread::ZlibDecoder::new(&mut cursor);
                     zlib_decoder.read_to_end(&mut buf)?;
 
-                    assert_eq!(buf.len(), obj_len);
+                    if buf.len() != obj_len {
+                        anyhow::bail!("malformed object. read {} expected {obj_len}", buf.len())
+                    }
 
                     let nbytes = cursor.position() as usize;
                     (
@@ -114,7 +116,10 @@ fn calculate_delta(raw: &[u8], obj_len: usize, packet: &Packet) -> anyhow::Resul
     let mut zlib_decoder = flate2::bufread::ZlibDecoder::new(&mut cursor);
     zlib_decoder.read_to_end(&mut buf)?;
 
-    assert_eq!(obj_len, buf.len());
+    if buf.len() != obj_len {
+        anyhow::bail!("malformed object. read {} expected {obj_len}", buf.len())
+    }
+
     let nbytes = cursor.position() as usize;
 
     let raw = &buf[..];

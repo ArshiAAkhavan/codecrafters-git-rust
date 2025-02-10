@@ -194,24 +194,32 @@ fn commit_tree(parent: String, message: String, tree: String) -> anyhow::Result<
 }
 
 pub fn git_clone(url: &str, dst: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    init(dst)?;
-    let client = reqwest::blocking::Client::new();
-    let refs = fetch_refs(&client, url)?;
-    let head_hash = refs
-        .iter()
-        .find(|(name, _)| name == "HEAD")
-        .map(|(_, hash)| hash)
-        .take()
-        .ok_or(anyhow!("no HEADs in refs"))?
-        .to_owned();
-    let packet = fetch_objects(&client, url, refs)?;
-    build_from_head(&head_hash, dst, &packet)?;
-    for obj in packet.objects.values() {
-        obj.persist_in(dst)?;
+    fn git_clone(url: &str, dst: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        init(dst)?;
+        let client = reqwest::blocking::Client::new();
+        let refs = fetch_refs(&client, url)?;
+        let head_hash = refs
+            .iter()
+            .find(|(name, _)| name == "HEAD")
+            .map(|(_, hash)| hash)
+            .take()
+            .ok_or(anyhow!("no HEADs in refs"))?
+            .to_owned();
+        let packet = fetch_objects(&client, url, refs)?;
+        build_from_head(&head_hash, dst, &packet)?;
+        for obj in packet.objects.values() {
+            obj.persist_in(dst)?;
+        }
+        Ok(())
     }
-
-    Ok(())
+    match git_clone(url, dst) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(dst);
+            Err(e)
+        }
+    }
 }
 
 fn fetch_objects(
